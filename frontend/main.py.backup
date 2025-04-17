@@ -1,0 +1,658 @@
+import os
+import sys
+import logging
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                          QHBoxLayout, QPushButton, QLabel, QLineEdit, 
+                          QMessageBox, QFileDialog, QTableWidget, QTableWidgetItem, 
+                          QHeaderView, QComboBox, QSpinBox, QDialog, QTextEdit,
+                          QSplitter, QTreeWidget, QTreeWidgetItem, QTabWidget,
+                          QScrollArea, QScrollBar)
+from PyQt6.QtCore import Qt, QSize, QPoint
+from PyQt6.QtGui import QIcon, QPixmap, QImage
+
+# Ajout du chemin racine au PYTHONPATH
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+from backend.api import *
+
+# Configuration du logging
+logger = logging.getLogger('ConsultationArticle')
+logger.setLevel(logging.DEBUG)
+
+# S'assurer que le logger n'a pas de handlers existants
+logger.handlers = []
+
+def setup_logging():
+    try:
+        # Créer le dossier de logs s'il n'existe pas
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Configurer le logging dans un fichier
+        log_file = os.path.join(log_dir, "app.log")
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+        
+        # Ajouter aussi un handler pour la console en mode debug
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+        logger.addHandler(console_handler)
+        
+        return log_file
+    except Exception as e:
+        print(f"Erreur lors de la configuration du logging : {e}")
+        return None
+
+def show_error_dialog(title, message, details=None):
+    try:
+        error_dialog = QMessageBox()
+        error_dialog.setIcon(QMessageBox.Icon.Critical)
+        error_dialog.setText(message)
+        if details:
+            error_dialog.setDetailedText(details)
+        error_dialog.setWindowTitle(title)
+        error_dialog.exec()
+    except Exception as e:
+        print(f"Erreur lors de l'affichage de la boîte de dialogue : {e}")
+
+class ArticleViewer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        
+        # Vérifier et configurer la base de données
+        self.setup_database()
+        
+        self.setWindowTitle("Consultation Article")
+        self.setGeometry(100, 100, 1200, 800)
+        logger.info("Initialisation de la fenêtre principale")
+
+        # Widget central avec splitter
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.setCentralWidget(self.splitter)
+
+        # Panneau de gauche pour la recherche et les résultats
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+
+        # Onglets pour la liste des résultats et l'arborescence
+        tabs = QTabWidget()
+        
+        # Onglet de recherche
+        search_tab = QWidget()
+        search_tab_layout = QVBoxLayout(search_tab)
+        
+        # Créer un splitter vertical pour la zone de recherche
+        search_splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        # Widget du haut pour la zone de recherche
+        search_top = QWidget()
+        search_top_layout = QVBoxLayout(search_top)
+        
+        # Zone de recherche
+        search_layout = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Rechercher par mot-clé...")
+        self.search_input.returnPressed.connect(self.search_articles)
+        search_button = QPushButton("Rechercher")
+        search_button.clicked.connect(self.search_articles)
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(search_button)
+        search_top_layout.addLayout(search_layout)
+        search_top_layout.addWidget(QLabel("Résultats de recherche :"))
+        
+        # Widget du bas pour la table des résultats
+        search_bottom = QWidget()
+        search_bottom_layout = QVBoxLayout(search_bottom)
+        
+        # Table des résultats de recherche
+        self.results_table = QTableWidget()
+        self.results_table.setColumnCount(5)
+        self.results_table.setHorizontalHeaderLabels([
+            "Code Article",
+            "Libellé",
+            "Propriétaire",
+            "Type",
+            "Stock"
+        ])
+        # Permettre le tri en cliquant sur les en-têtes
+        self.results_table.setSortingEnabled(True)
+        # Ajuster les colonnes au contenu
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.results_table.horizontalHeader().setSectionsMovable(True)
+        # Connecter le clic sur un élément
+        self.results_table.itemClicked.connect(self.on_result_selected)
+        search_bottom_layout.addWidget(self.results_table)
+        
+        # Ajouter les widgets au splitter
+        search_splitter.addWidget(search_top)
+        search_splitter.addWidget(search_bottom)
+        
+        # Définir les tailles initiales (30% pour la recherche, 70% pour les résultats)
+        search_splitter.setStretchFactor(0, 1)
+        search_splitter.setStretchFactor(1, 2)
+        
+        # Ajouter le splitter au layout de l'onglet de recherche
+        search_tab_layout.addWidget(search_splitter)
+        
+        tabs.addTab(search_tab, "Recherche")
+        
+        # Onglet d'arborescence
+        tree_tab = QWidget()
+        tree_tab_layout = QVBoxLayout(tree_tab)
+        tree_tab_layout.addWidget(QLabel("Arborescence de l'article :"))
+        
+        # Zone de recherche pour l'arborescence
+        tree_search_layout = QHBoxLayout()
+        self.tree_code_input = QLineEdit()
+        self.tree_code_input.setPlaceholderText("Entrez un code article...")
+        self.tree_code_input.returnPressed.connect(self.show_article_tree)
+        tree_search_button = QPushButton("Afficher l'arborescence")
+        tree_search_button.clicked.connect(self.show_article_tree)
+        tree_search_layout.addWidget(self.tree_code_input)
+        tree_search_layout.addWidget(tree_search_button)
+        tree_tab_layout.addLayout(tree_search_layout)
+        
+        # Arbre des articles
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setHeaderLabels([
+            "Code Article | Libellé | Propriétaire | Quantité | Type"
+        ])
+        self.tree_widget.setColumnWidth(0, 800)  # Largeur de la colonne principale
+        self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
+        tree_tab_layout.addWidget(self.tree_widget)
+        
+        tabs.addTab(tree_tab, "Arborescence")
+        
+        left_layout.addWidget(tabs)
+
+        # Panneau de droite pour les détails
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
+        # Onglets pour les détails
+        details_tabs = QTabWidget()
+
+        # Onglet Informations
+        info_tab = QWidget()
+        info_layout = QVBoxLayout(info_tab)
+        
+        # Informations de l'article
+        self.article_info = QLabel()
+        self.article_info.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        info_layout.addWidget(self.article_info)
+
+        # Table des fabricants
+        info_layout.addWidget(QLabel("Fabricants :"))
+        self.manufacturers_table = QTableWidget()
+        self.manufacturers_table.setColumnCount(2)
+        self.manufacturers_table.setHorizontalHeaderLabels(["Nom Fabricant", "Référence Article"])
+        info_layout.addWidget(self.manufacturers_table)
+
+        # Table des nomenclatures
+        info_layout.addWidget(QLabel("Nomenclatures :"))
+        self.nomenclatures_table = QTableWidget()
+        self.nomenclatures_table.setColumnCount(5)
+        self.nomenclatures_table.setHorizontalHeaderLabels([
+            "Code Article",
+            "Libellé",
+            "Type",
+            "Statut",
+            "Quantité"
+        ])
+        self.nomenclatures_table.setSortingEnabled(True)
+        self.nomenclatures_table.horizontalHeader().setStretchLastSection(True)
+        self.nomenclatures_table.horizontalHeader().setSectionsMovable(True)
+        info_layout.addWidget(self.nomenclatures_table)
+
+        details_tabs.addTab(info_tab, "Informations")
+
+        # Onglet Images
+        images_tab = QWidget()
+        images_layout = QVBoxLayout(images_tab)
+
+        # Zone de défilement pour l'image
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Widget pour contenir l'image
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scroll_area.setWidget(self.image_label)
+        images_layout.addWidget(scroll_area)
+
+        # Contrôles de navigation des images
+        nav_layout = QHBoxLayout()
+        self.prev_image_btn = QPushButton("Image précédente")
+        self.prev_image_btn.clicked.connect(self.show_previous_image)
+        self.next_image_btn = QPushButton("Image suivante")
+        self.next_image_btn.clicked.connect(self.show_next_image)
+        self.image_counter_label = QLabel("Image 0/0")
+        
+        nav_layout.addWidget(self.prev_image_btn)
+        nav_layout.addWidget(self.image_counter_label)
+        nav_layout.addWidget(self.next_image_btn)
+        images_layout.addLayout(nav_layout)
+
+        details_tabs.addTab(images_tab, "Images")
+
+        right_layout.addWidget(details_tabs)
+
+        # Ajouter les panneaux au splitter
+        self.splitter.addWidget(left_panel)
+        self.splitter.addWidget(right_panel)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 2)
+
+        # Initialiser les variables pour la gestion des images
+        self.current_images = []
+        self.current_image_index = -1
+
+        # Bouton de configuration de la base de données
+        db_button = QPushButton("Configurer Base de Données")
+        db_button.clicked.connect(self.configure_database)
+        left_layout.addWidget(db_button)
+
+        logger.info("Interface utilisateur initialisée")
+
+    def add_article_to_tree(self, parent_item, article_data, level=0):
+        """Ajoute un article et ses enfants à l'arbre"""
+        article = article_data["article"]
+        
+        # Créer l'item de l'arbre
+        if parent_item is None:
+            item = QTreeWidgetItem(self.tree_widget)
+        else:
+            item = QTreeWidgetItem(parent_item)
+            
+        # Définir le texte de l'item
+        quantite = article_data.get("quantite", "")
+        item.setText(0, f"{article.code_article} | {article.libelle_court_article} | {article.proprietaire_article} | {quantite} | {article.type_article}")
+        
+        # Stocker le code article dans les données de l'item
+        item.setData(0, Qt.ItemDataRole.UserRole, article.code_article)
+        
+        # Ajouter les enfants récursivement
+        for child in article_data["children"]:
+            child_data = child["tree"]
+            child_data["quantite"] = child["quantite"]
+            self.add_article_to_tree(item, child_data, level + 1)
+
+    def show_article_tree(self):
+        """Affiche l'arborescence d'un article"""
+        code_article = self.tree_code_input.text().strip()
+        if not code_article:
+            QMessageBox.warning(self, "Erreur", "Veuillez entrer un code article")
+            return
+
+        try:
+            # Effacer l'arbre existant
+            self.tree_widget.clear()
+            
+            # Récupérer l'arborescence
+            tree_data = get_article_tree(code_article)
+            if tree_data:
+                # Ajouter l'article et ses enfants à l'arbre
+                self.add_article_to_tree(None, tree_data)
+                # Développer tous les nœuds
+                self.tree_widget.expandAll()
+                # Afficher les détails de l'article racine
+                self.display_article(code_article)
+            else:
+                QMessageBox.warning(self, "Erreur", f"Article {code_article} non trouvé")
+
+        except Exception as e:
+            logger.error(f"Erreur lors de l'affichage de l'arborescence : {e}")
+            QMessageBox.critical(self, "Erreur", f"Une erreur est survenue : {str(e)}")
+
+    def on_tree_item_clicked(self, item, column):
+        """Appelé quand un item de l'arbre est cliqué"""
+        code_article = item.data(0, Qt.ItemDataRole.UserRole)
+        if code_article:
+            self.display_article(code_article)
+
+    def search_articles(self):
+        search_term = self.search_input.text().strip()
+        if not search_term:
+            QMessageBox.warning(self, "Erreur", "Veuillez entrer un terme de recherche")
+            return
+
+        try:
+            # Rechercher les articles
+            logger.info(f"Recherche d'articles avec le terme : {search_term}")
+            articles = search_articles(search_term)
+            
+            # Effacer la table précédente
+            self.results_table.setRowCount(0)
+            
+            # Afficher les résultats
+            self.results_table.setRowCount(len(articles))
+            for i, article in enumerate(articles):
+                # Code article
+                code_item = QTableWidgetItem(article.code_article)
+                self.results_table.setItem(i, 0, code_item)
+                
+                # Libellé
+                self.results_table.setItem(i, 1, QTableWidgetItem(article.libelle_court_article))
+                
+                # Propriétaire
+                self.results_table.setItem(i, 2, QTableWidgetItem(article.proprietaire_article))
+                
+                # Type
+                self.results_table.setItem(i, 3, QTableWidgetItem(article.type_article))
+                
+                # Stock
+                self.results_table.setItem(i, 4, QTableWidgetItem(str(article.is_oc)))
+            
+            # Ajuster les colonnes au contenu
+            self.results_table.resizeColumnsToContents()
+            
+            logger.info(f"Trouvé {len(articles)} articles")
+            
+            if not articles:
+                QMessageBox.information(self, "Information", "Aucun article trouvé")
+
+        except Exception as e:
+            logger.error(f"Erreur lors de la recherche : {e}")
+            QMessageBox.critical(self, "Erreur", f"Une erreur est survenue : {str(e)}")
+
+    def on_result_selected(self, item):
+        """Appelé lorsqu'un article est sélectionné dans la table des résultats"""
+        try:
+            # Récupérer le code article de la première colonne de la ligne sélectionnée
+            row = item.row()
+            code_item = self.results_table.item(row, 0)
+            if code_item is None:
+                logger.error("Code article non trouvé dans la table des résultats")
+                return
+            
+            code_article = code_item.text().strip()
+            if not code_article:
+                logger.error("Code article vide")
+                return
+                
+            logger.info(f"Article sélectionné : {code_article}")
+            self.display_article(code_article)
+            # Mettre à jour l'arborescence aussi
+            self.tree_code_input.setText(code_article)
+            self.show_article_tree()
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la sélection de l'article : {e}")
+            QMessageBox.critical(self, "Erreur", f"Une erreur s'est produite lors de la sélection de l'article : {str(e)}")
+
+    def display_article(self, code_article):
+        """Affiche les détails d'un article"""
+        try:
+            if not code_article or not isinstance(code_article, str):
+                logger.error(f"Code article invalide dans display_article : {code_article}")
+                raise ValueError(f"Code article invalide : {code_article}")
+
+            logger.info(f"Recherche de l'article avec le code : {code_article}")
+            article = get_article_by_code(code_article)
+            
+            if article:
+                logger.info(f"Article trouvé : {article.code_article}")
+                logger.debug(f"Détails de l'article : {vars(article)}")
+                # Afficher les informations de base
+                info_text = f"""
+                <h2>{article.libelle_court_article}</h2>
+                <p><b>Code article :</b> {article.code_article}</p>
+                <p><b>Propriétaire :</b> {article.proprietaire_article}</p>
+                <p><b>Type :</b> {article.type_article or 'Non spécifié'}</p>
+                """
+
+                if article.libelle_long_article:
+                    info_text += f"<p><b>Description :</b> {article.libelle_long_article}</p>"
+
+                if article.description_famille_d_achat:
+                    info_text += f"<p><b>Famille d'achat :</b> {article.description_famille_d_achat}</p>"
+
+                if article.commentaire_technique:
+                    info_text += f"<p><b>Commentaire technique :</b> {article.commentaire_technique}</p>"
+
+                if article.commentaire_logistique:
+                    info_text += f"<p><b>Commentaire logistique :</b> {article.commentaire_logistique}</p>"
+
+                self.article_info.setText(info_text)
+
+                try:
+                    # Afficher les fabricants
+                    logger.info("Récupération des fabricants")
+                    manufacturers = get_manufacturers_by_article(code_article)
+                    logger.debug(f"Nombre de fabricants trouvés : {len(manufacturers)}")
+                    self.manufacturers_table.setRowCount(len(manufacturers))
+                    for i, mfr in enumerate(manufacturers):
+                        self.manufacturers_table.setItem(i, 0, QTableWidgetItem(mfr.nom_fabricant or ''))
+                        self.manufacturers_table.setItem(i, 1, QTableWidgetItem(mfr.reference_article_fabricant or ''))
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'affichage des fabricants : {str(e)}")
+
+                try:
+                    # Afficher les nomenclatures
+                    logger.info("Récupération des nomenclatures")
+                    nomenclatures = get_nomenclatures_by_article(code_article)
+                    logger.debug(f"Nombre de nomenclatures trouvées : {len(nomenclatures)}")
+                    self.nomenclatures_table.setRowCount(len(nomenclatures))
+                    for i, nom in enumerate(nomenclatures):
+                        self.nomenclatures_table.setItem(i, 0, QTableWidgetItem(nom["code_article"]))
+                        self.nomenclatures_table.setItem(i, 1, QTableWidgetItem(nom["libelle_court_article"]))
+                        self.nomenclatures_table.setItem(i, 2, QTableWidgetItem(nom["type_article"] or ''))
+                        self.nomenclatures_table.setItem(i, 3, QTableWidgetItem(nom["statut_abrege_article"] or ''))
+                        self.nomenclatures_table.setItem(i, 4, QTableWidgetItem(str(nom["quantite"])))
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'affichage des nomenclatures : {str(e)}")
+
+                # Charger les images
+                try:
+                    logger.info(f"Chargement des images pour l'article {code_article}")
+                    self.load_images(code_article)
+                except Exception as e:
+                    logger.error(f"Erreur lors du chargement des images : {str(e)}")
+
+            else:
+                logger.error(f"Article non trouvé : {code_article}")
+                QMessageBox.warning(self, "Article non trouvé", f"Aucun article trouvé avec le code {code_article}")
+                self.clear_display()
+
+        except Exception as e:
+            logger.error(f"Erreur lors de l'affichage de l'article {code_article} : {str(e)}", exc_info=True)
+            QMessageBox.critical(self, "Erreur", f"Une erreur s'est produite : {str(e)}")
+            self.clear_display()
+
+    def load_images(self, code_article):
+        """Charge les images associées à un article"""
+        try:
+            if not code_article or not isinstance(code_article, str):
+                logger.warning(f"Code article invalide : {code_article}")
+                self.image_label.setText("Code article invalide")
+                self.image_counter_label.setText("Image 0/0")
+                self.update_image_navigation()
+                return
+                
+            logger.info(f"Chargement des images pour l'article {code_article}")
+            self.current_images = get_images_by_article(code_article)
+            self.current_image_index = -1
+            
+            if not self.current_images:
+                logger.info(f"Aucune image trouvée pour l'article {code_article}")
+                self.image_label.setText(f"Aucune image disponible pour l'article {code_article}")
+                self.image_counter_label.setText("Image 0/0")
+                self.current_images = []
+                self.current_image_index = -1
+                self.update_image_navigation()
+                return
+                
+            logger.info(f"Nombre d'images trouvées : {len(self.current_images)}")
+            self.show_image(0)
+
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement des images : {e}")
+            self.image_label.setText("Erreur lors du chargement des images")
+            self.current_images = []
+            self.current_image_index = -1
+            self.image_counter_label.setText("Image 0/0")
+            self.update_image_navigation()
+
+    def show_image(self, index):
+        """Affiche l'image à l'index spécifié"""
+        if 0 <= index < len(self.current_images):
+            try:
+                image = self.current_images[index]
+                pixmap = QPixmap()
+                pixmap.loadFromData(image.image)
+                
+                # Ajuster la taille de l'image pour qu'elle tienne dans la fenêtre
+                scaled_pixmap = pixmap.scaled(
+                    self.image_label.width(),
+                    self.image_label.height(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                
+                self.image_label.setPixmap(scaled_pixmap)
+                self.current_image_index = index
+                self.image_counter_label.setText(f"Image {index + 1}/{len(self.current_images)}")
+                self.update_image_navigation()
+            except Exception as e:
+                logger.error(f"Erreur lors de l'affichage de l'image : {e}")
+                self.image_label.setText("Erreur lors de l'affichage de l'image")
+
+    def show_previous_image(self):
+        """Affiche l'image précédente"""
+        if self.current_image_index > 0:
+            self.show_image(self.current_image_index - 1)
+
+    def show_next_image(self):
+        """Affiche l'image suivante"""
+        if self.current_image_index < len(self.current_images) - 1:
+            self.show_image(self.current_image_index + 1)
+
+    def update_image_navigation(self):
+        """Met à jour l'état des boutons de navigation"""
+        self.prev_image_btn.setEnabled(self.current_image_index > 0)
+        self.next_image_btn.setEnabled(self.current_image_index < len(self.current_images) - 1)
+
+    def clear_display(self):
+        """Efface tous les champs d'affichage"""
+        self.article_info.clear()
+        self.manufacturers_table.setRowCount(0)
+        self.nomenclatures_table.setRowCount(0)
+        self.image_label.clear()
+        self.image_counter_label.setText("Image 0/0")
+        self.current_images = []
+        self.current_image_index = -1
+        self.update_image_navigation()
+
+    def setup_database(self):
+        """Configure la base de données au démarrage"""
+        try:
+            # Vérifier si la base de données existe dans le répertoire de l'exécutable
+            db_path = os.path.join(get_executable_dir(), "articles.db")
+            
+            if not os.path.exists(db_path):
+                QMessageBox.critical(
+                    self,
+                    "Base de données introuvable",
+                    f"La base de données n'a pas été trouvée dans le répertoire de l'application.\n\n"
+                    f"Veuillez copier le fichier 'articles.db' dans le répertoire :\n{get_executable_dir()}"
+                )
+                sys.exit(1)
+            
+            # Configurer l'URL de la base de données
+            os.environ['DATABASE_URL'] = get_database_url(db_path)
+            logger.info(f"Base de données configurée : {db_path}")
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la configuration de la base de données : {e}")
+            QMessageBox.critical(
+                self,
+                "Erreur de configuration",
+                f"Une erreur est survenue lors de la configuration de la base de données :\n{str(e)}"
+            )
+            sys.exit(1)
+
+    def configure_database(self):
+        """Permet à l'utilisateur de sélectionner le fichier de base de données"""
+        try:
+            file_dialog = QFileDialog()
+            db_file, _ = file_dialog.getOpenFileName(
+                self,
+                "Sélectionner la base de données SQLite",
+                "",
+                "Fichiers SQLite (*.db);;Tous les fichiers (*.*)"
+            )
+            
+            if db_file:
+                # Vérifier que le fichier est une base SQLite valide avec les bonnes tables
+                try:
+                    test_engine = create_engine(f"sqlite:///{db_file}")
+                    with Session(test_engine) as session:
+                        # Test si la table article existe
+                        session.exec(select(Article)).first()
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Base de données invalide",
+                        "Le fichier sélectionné n'est pas une base de données valide ou ne contient pas les tables requises."
+                    )
+                    return
+                
+                # Si tout est OK, sauvegarder le chemin
+                settings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database_settings.txt")
+                with open(settings_file, 'w') as f:
+                    f.write(db_file)
+                
+                # Configurer l'URL de la base de données
+                os.environ['DATABASE_URL'] = get_database_url(db_file)
+                logger.info(f"Nouvelle base de données configurée : {db_file}")
+                
+                QMessageBox.information(
+                    self,
+                    "Configuration réussie",
+                    "La base de données a été configurée avec succès."
+                )
+        except Exception as e:
+            logger.error(f"Erreur lors de la configuration de la base de données : {e}")
+            QMessageBox.critical(
+                self,
+                "Erreur de configuration",
+                f"Une erreur est survenue lors de la configuration de la base de données :\n{str(e)}"
+            )
+
+def main():
+    try:
+        # Initialiser QApplication avant tout
+        app = QApplication(sys.argv)
+        
+        # Configurer le logging
+        log_file = setup_logging()
+        logger.info("Démarrage de l'application")
+        
+        try:
+            # Créer et afficher la fenêtre principale
+            window = ArticleViewer()
+            window.show()
+            logger.info("Application prête")
+            
+            # Démarrer la boucle d'événements
+            return app.exec()
+            
+        except Exception as e:
+            error_msg = f"Erreur lors de l'initialisation de l'interface : {str(e)}"
+            logger.error(error_msg)
+            show_error_dialog("Erreur d'Initialisation", error_msg,
+                            f"Détails de l'erreur :\n{str(e)}\n\nConsultez le fichier de log pour plus d'informations :\n{log_file}")
+            return 1
+            
+    except Exception as e:
+        # En cas d'erreur critique avant même l'initialisation de Qt
+        print(f"Erreur critique : {str(e)}")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.env
+
+# Virtual environments
+.venv
+
+# Excel Files
+*.xlsx
+*.xls
+
+# Database
+*.db
+*.db-journal
+database_settings.txt
+
+# Deployment
+deployment/
+
+# Logs
+app.log
