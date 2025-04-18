@@ -136,11 +136,13 @@ class SearchPanel(QWidget):
                 # Requête avec jointure et conditions
                 query = (
                     select(Article)
+                    .distinct()
                     .outerjoin(ArticleManufacturer)
                     .where(or_(*article_conditions))
                 )
                 
                 results = session.exec(query).all()
+                print(results)
                 self.update_results(results)
         except Exception as e:
             import traceback
